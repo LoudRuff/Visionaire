@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Visionaire-AI</title>
+</head>
+<body>
+  <header class="top-bar">
+    <div class="logo">
+      <span class="logo-icon"></span>
+      Vision Assistant
+    </div>
+    <div class="status-area">
+      <div class="status">
+        <span class="status-dot"></span>
+        Active
+      </div>
+    </div>
+  </header>
+  <main class="workspace">
+    <button class="arrow-btn" title="Navigate">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+        stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6" />
+      </svg>
+    </button>
+    <section class="assistant-card">
+      <div class="info-box">
+        <h1>Ready to Assist</h1>
+        <p>Tap to activate</p>
+      </div>
+      <div class="camera-view" role="button" aria-label="Activate camera">
+        <div class="camera-status">Camera Off</div>
+        <div class="camera-action">Tap to activate</div>
+        <!--
+          NEW: canvas now lives directly inside .camera-view in the markup
+          itself, instead of being appended here at runtime by JS. This is
+          more robust — it can never accidentally get left outside the
+          camera box, and it inherits .camera-view's overflow:hidden and
+          rounded corners automatically.
+        -->
+        <canvas id="yoloCanvas" width="640" height="640"></canvas>
+      </div>
+    </section>
+  </main>
+  <a href="register.html" class="register-button">
+    Register My Object
+  </a>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script><!--for yolo intialisation-->
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Register — Visionaire-AI</title>
+</head>
+<body>
+  <header class="top-bar">
+    <div class="logo">
+      <span class="logo-icon"></span>
+      Vision Assistant
+    </div>
+    <div class="status-area">
+      <div class="status">
+        <span class="status-dot"></span>
+        Active
+      </div>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="assistant-card">
+      <div class="info-box">
+        <h1>Register Object or Person</h1>
+        <p id="statusMessage">Add a photo and a name so Visionaire can recognize it later.</p>
+      </div>
+
+      <div class="camera-view register-view" id="uploadArea">
+        <div class="upload-icon">＋</div>
+        <div class="camera-status">Upload a Photo</div>
+        <div class="camera-action">Tap to choose an image</div>
+        <input type="file" id="objectImage" accept="image/*" capture="environment" hidden>
+      </div>
+
+      <div class="camera-view register-view preview-view" id="previewContainer" style="display:none;">
+        <img id="imagePreview" alt="Preview">
+      </div>
+      <button type="button" id="removeImage" class="register-button remove-btn" style="display:none;">
+        Remove Photo
+      </button>
+
+      <div class="form-section">
+        <label for="objectName">Name (what you'll say out loud)</label>
+        <input type="text" id="objectName" placeholder="e.g. My Bottle, or John" autocomplete="off">
+
+        <label for="objectType">Type</label>
+        <input type="text" id="objectType" placeholder="e.g. bottle, cup, person" autocomplete="off">
+      </div>
+
+      <button type="button" id="saveObject" class="register-button submit-btn">
+        Register
+      </button>
+    </section>
+  </main>
+
+  <a href="index.html" class="register-button back-link">
+    Back to Camera
+  </a>
+
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script src="register.js"></script>
+</body>
+</html>
