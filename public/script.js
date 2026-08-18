@@ -10,6 +10,36 @@ let targetObject = null;
 let objectFound = false;
 let isSpeaking = false;
 
+// ---- NEW: registered custom objects ----
+// targetObject stays a COCO class name (e.g. "bottle") since that's what
+// the detection block matches against — it is not touched. displayName
+// is purely cosmetic: what gets spoken/shown instead of the raw class
+// name, when the user's spoken command matched something they registered.
+let cachedRegisteredObjects = [];
+let targetDisplayName = null;
+
+async function loadRegisteredObjects() {
+    try {
+        const res = await fetch("/api/objects");
+        const data = await res.json();
+        cachedRegisteredObjects = data.objects || [];
+    } catch (e) {
+        console.warn("Could not load registered objects:", e);
+    }
+}
+loadRegisteredObjects();
+
+// ============================================================
+// Simple candidate resolver — picks the single most confident box
+// matching the target class this frame. Replaces the earlier MobileNet
+// similarity-matching version: no specific-instance matching for now,
+// just reliable class-based detection + collinear alignment.
+// ============================================================
+function resolveTargetCandidate(candidates) {
+    if (candidates.length === 0) return null;
+    return candidates.reduce((a, b) => (a.score > b.score ? a : b));
+}
+
 // ---- NEW: real native recognizer state tracking ----
 // recognitionStarted = user's intent ("mic should be on").
 // recognitionActive  = what the browser's SpeechRecognition object is
@@ -25,7 +55,68 @@ let restartTimeout = null;
 // "found". We require several consecutive/cumulative frames above the
 // threshold before we trust the detection.
 let candidateFrames = 0;
-const REQUIRED_FRAMES = 4;
+const REQUIRED_FRAMES = 2; // lowered for demo reliability (was 4)
+
+// ---- NEW: collinear alignment state ----
+// Tracks whether the target object is centered in frame (left/right of
+// canvas center), independent of the detection/parsing logic itself.
+let lastAlignState = null;
+let alignStableCount = 0;
+const ALIGN_TOLERANCE_RATIO = 0.08; // ~8% of canvas width counts as centered
+const ALIGN_STABLE_FRAMES = 3;
+
+/**
+ * Pure alignment/navigation logic — takes a box center X (in the same
+ * 640-wide canvas coordinate space YOLO already outputs) and the canvas
+ * width, and speaks a turn-left/turn-right/aligned instruction.
+ * Does NOT touch detection/parsing — only consumes the x,y,w,h that the
+ * detection block already computed for the matched target.
+ */
+function handleAlignment(boxCenterX, canvasWidth) {
+    const frameCenterX = canvasWidth / 2;
+    const offsetRatio = (boxCenterX - frameCenterX) / canvasWidth;
+
+    let state;
+    let message = null;
+
+    if (Math.abs(offsetRatio) <= ALIGN_TOLERANCE_RATIO) {
+        state = "ALIGNED";
+        alignStableCount++;
+        if (alignStableCount >= ALIGN_STABLE_FRAMES) {
+            if (lastAlignState !== "ALIGNED_CONFIRMED") {
+                message = "Aligned, object straight ahead.";
+                lastAlignState = "ALIGNED_CONFIRMED";
+            }
+        }
+    } else if (offsetRatio < 0) {
+        state = "TURN_LEFT";
+        alignStableCount = 0;
+        if (lastAlignState !== "TURN_LEFT") {
+            message = Math.abs(offsetRatio) > ALIGN_TOLERANCE_RATIO * 3
+                ? "Turn left"
+                : "Turn slightly left";
+            lastAlignState = "TURN_LEFT";
+        }
+    } else {
+        state = "TURN_RIGHT";
+        alignStableCount = 0;
+        if (lastAlignState !== "TURN_RIGHT") {
+            message = Math.abs(offsetRatio) > ALIGN_TOLERANCE_RATIO * 3
+                ? "Turn right"
+                : "Turn slightly right";
+            lastAlignState = "TURN_RIGHT";
+        }
+    }
+
+    if (message && !isSpeaking) {
+        speak(message);
+    }
+}
+
+function resetAlignmentState() {
+    lastAlignState = null;
+    alignStableCount = 0;
+}
 
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -107,23 +198,14 @@ function speak(text, callback) {
 }
 
 // ============================================================
-// FIX: canvas overlay setup
+// Canvas reference
 // ============================================================
-// This canvas is grabbed later in the file too (for YOLO), but we need
-// a reference up here so openCamera() can keep it alive across camera
-// (re)starts. Declared once, styled once, reused every time.
+// NEW: canvas now lives permanently inside .camera-view in index.html,
+// and its overlay positioning (position/inset/size/z-index/pointer-events)
+// is handled entirely in style.css (#yoloCanvas rule). No inline styling
+// or DOM-relocation needed here anymore — just grab the reference once.
 const canvas = document.getElementById("yoloCanvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-// FIX: force the canvas to sit exactly on top of the video, full-bleed,
-// regardless of what CSS (or lack of CSS) exists in the stylesheet.
-// pointer-events:none so it never blocks the cameraView click listener.
-canvas.style.position = "absolute";
-canvas.style.inset = "0";
-canvas.style.width = "100%";
-canvas.style.height = "100%";
-canvas.style.zIndex = "5";
-canvas.style.pointerEvents = "none";
 
 async function openCamera() {
 
@@ -155,17 +237,26 @@ async function openCamera() {
         video.style.position = "absolute";
         video.style.inset = "0";
 
-        // FIX: cameraView.innerHTML = "" used to also delete the
-        // yoloCanvas element if it lived inside .camera-view — the
+        // FIX: previously "cameraView.innerHTML = \"\"" wiped out every
+        // child of .camera-view, including the yoloCanvas element — the
         // `canvas` variable would then point to a detached node, so every
         // strokeRect()/fillText() call after this succeeded silently but
-        // never appeared on screen. We now clear the container and
-        // re-attach BOTH elements in the correct stacking order every
-        // time the camera opens, so the canvas is guaranteed to be a live
-        // child of the page, on top of the video.
-        cameraView.innerHTML = "";
-        cameraView.appendChild(video);
-        cameraView.appendChild(canvas);
+        // never appeared on screen. Canvas now lives in the HTML markup
+        // itself (see index.html) and is never removed, so we only need
+        // to insert the video BEHIND it — using insertBefore instead of
+        // innerHTML-wiping the container keeps the canvas exactly where
+        // it already is in the DOM.
+        const oldVideo = cameraView.querySelector("video");
+        if (oldVideo) oldVideo.remove();
+        cameraView.insertBefore(video, canvas);
+
+        // NEW: hide the "Camera Off / Tap to activate" placeholder text
+        // now that the live feed is showing underneath it — same markup,
+        // just no longer visible once the camera is actually on.
+        const statusEl = cameraView.querySelector(".camera-status");
+        const actionEl = cameraView.querySelector(".camera-action");
+        if (statusEl) statusEl.style.display = "none";
+        if (actionEl) actionEl.style.display = "none";
 
         await video.play();
 
@@ -248,9 +339,23 @@ function simulateObjectSearch(objectName) {
 
 // Start universal object search
 function startObjectSearch(objectName) {
-    targetObject = objectName.toLowerCase().trim();
+    let spoken = objectName.toLowerCase().trim();
     // Clean common leading articles
-    targetObject = targetObject.replace(/^(a|an|the)\s+/, "").trim();
+    spoken = spoken.replace(/^(a|an|the)\s+/, "").trim();
+
+    // NEW: check if the spoken phrase matches a registered custom object
+    // (e.g. "my bottle"). If so, detection still targets the COCO class
+    // it was registered under (e.g. "bottle" — unchanged detection math),
+    // but we remember the friendly name to speak/display instead.
+    const registeredMatch = cachedRegisteredObjects.find(obj => spoken.includes(obj.name));
+
+    if (registeredMatch) {
+        targetObject = registeredMatch.type;      // what detection matches against
+        targetDisplayName = registeredMatch.name; // what gets spoken/shown
+    } else {
+        targetObject = spoken;
+        targetDisplayName = spoken;
+    }
 
     objectFound = false;
     isSearching = true;
@@ -258,13 +363,14 @@ function startObjectSearch(objectName) {
     // NEW: reset the frame-confirmation counter every time a new search
     // starts, so a stale count from a previous target can't carry over.
     candidateFrames = 0;
+    resetAlignmentState(); // NEW: also reset alignment so old left/right state doesn't carry over
 
     updateUI(
         "Finding Object",
-        `Looking for ${targetObject}...`
+        `Looking for ${targetDisplayName}...`
     );
 
-    speak(`Looking for ${targetObject}.`);
+    speak(`Looking for ${targetDisplayName}.`);
 }
 
 recognition.onresult = (e) => {
@@ -397,8 +503,17 @@ let yolo = null;
 async function loadYOLO() {
     console.log("🤖 Loading YOLO...");
     try {
+        // FIX: path corrected to match the actual folder structure
+        // (public/models/yolov8n.onnx — confirmed plural "models" folder).
+        // FIX: executionProviders pinned to ["wasm"] explicitly — without
+        // this, onnxruntime-web probes for a WebGPU adapter first by
+        // default, which is what produced the harmless-but-noisy
+        // "No available adapters" console error on devices/browsers
+        // without WebGPU support, and wastes a bit of startup time on
+        // every load.
         yolo = await ort.InferenceSession.create(
-            "models/yolov8n.onnx"
+            "models/yolov8n.onnx",
+            { executionProviders: ["wasm"] }
         );
         console.log("🤖 YOLO model loaded successfully.");
 
@@ -470,7 +585,7 @@ const classes = [
 ];
 
 let lastDetectTime = 0;
-const DETECT_INTERVAL = 200; // Throttle to ~10 FPS to prevent freezing main thread
+const DETECT_INTERVAL = 250; // MobileNet similarity checks were removed, so plain YOLO inference is lighter — 250ms (~4 checks/sec) balances responsiveness against camera lag.
 
 // NOTE: threshold left moderate (not cranked to 0.45) because raw
 // confidence was already topping out around 0.20 on the stretched image.
@@ -587,6 +702,13 @@ async function detectObjects() {
         // can decay the candidateFrames counter when it's briefly lost.
         let seenThisFrame = false;
 
+        // FIX: this was referenced below (.push, then passed to the
+        // resolver) but never declared — every frame that found a match
+        // threw "ReferenceError: matchingCandidates is not defined",
+        // which the catch block below logged as "YOLO Error:". This was
+        // the actual cause of the recurring YOLO error.
+        let matchingCandidates = [];
+
         // Loop through all 8400 predictions
         for (let i = 0; i < 8400; i++) {
 
@@ -622,59 +744,88 @@ async function detectObjects() {
     );
 }
 
-            // Draw green box for the object we are searching for
+            // Collect every box matching the target CLASS instead of
+            // acting on it immediately — with multiple matching objects in
+            // frame, this loop can hit more than one. We resolve down to a
+            // single winner (highest confidence) right after the loop.
+            // Class/score extraction above this point is unchanged.
             if (
     isSearching &&
     targetObject &&
     detectedClassName === targetObject &&
     bestScore >= CONFIDENCE_THRESHOLD
 ) {
+                matchingCandidates.push({
+                    x: output[i],
+                    y: output[8400 + i],
+                    w: output[8400 * 2 + i],
+                    h: output[8400 * 3 + i],
+                    score: bestScore,
+                    classIndex: bestClass
+                });
+            }
 
-                seenThisFrame = true;
+        }
 
-                const x = output[i];
-                const y = output[8400 + i];
-                const w = output[8400 * 2 + i];
-                const h = output[8400 * 3 + i];
+        // Resolve the single correct box out of every candidate that
+        // matched the target class this frame — the most confident
+        // detection wins. Only this one box gets drawn/aligned/confirmed,
+        // so multiple objects of the same class in frame don't all light
+        // up at once.
+        const winner = resolveTargetCandidate(matchingCandidates);
 
-                ctx.strokeStyle = "lime";
-                ctx.lineWidth = 5;
+        if (winner) {
 
-                ctx.strokeRect(
-                    x - w / 2,
-                    y - h / 2,
-                    w,
-                    h
-                );
+            seenThisFrame = true;
 
-                ctx.fillStyle = "#00ff66";
-                ctx.font = "22px Arial";
+            const { x, y, w, h, classIndex, score } = winner;
 
-                ctx.fillText(
-                    `${classes[bestClass]} ${(bestScore * 100).toFixed(0)}%`,
-                    x - w / 2,
-                    y - h / 2 - 8
-                );
+            ctx.strokeStyle = "lime";
+            ctx.lineWidth = 5;
 
-                // NEW: require REQUIRED_FRAMES consistent hits above
-                // threshold before trusting the detection, instead of
-                // declaring "found" off a single frame.
-                if (!objectFound) {
-                    candidateFrames++;
+            ctx.strokeRect(
+                x - w / 2,
+                y - h / 2,
+                w,
+                h
+            );
 
-                    if (candidateFrames >= REQUIRED_FRAMES) {
-                        objectFound = true;
-                        console.log("TARGET FOUND:", classes[bestClass]);
+            ctx.fillStyle = "#00ff66";
+            ctx.font = "22px Arial";
 
-                        updateUI(
-                            "Object Found",
-                            `${classes[bestClass].charAt(0).toUpperCase() + classes[bestClass].slice(1)} detected.`
-                        );
+            ctx.fillText(
+                `${classes[classIndex]} ${(score * 100).toFixed(0)}%`,
+                x - w / 2,
+                y - h / 2 - 8
+            );
 
-                        speak(`${classes[bestClass]} detected.`);
-                    }
+            // NEW: collinear alignment — uses the same x/canvas width
+            // already computed above, doesn't touch detection/parsing.
+            handleAlignment(x, canvas.width);
+
+            // NEW: require REQUIRED_FRAMES consistent hits above
+            // threshold before trusting the detection, instead of
+            // declaring "found" off a single frame.
+            if (!objectFound) {
+                candidateFrames++;
+
+                if (candidateFrames >= REQUIRED_FRAMES) {
+                    objectFound = true;
+                    console.log("TARGET FOUND:", classes[classIndex]);
+
+                    // NEW: speak the registered friendly name (e.g. "my bottle")
+                    // if this search came from a registered object match,
+                    // otherwise fall back to the raw detected class name.
+                    // The detection/scoring logic above this line is unchanged.
+                    const announceName = targetDisplayName || classes[classIndex];
+
+                    updateUI(
+                        "Object Found",
+                        `${announceName.charAt(0).toUpperCase() + announceName.slice(1)} detected.`
+                    );
+
+                    speak(`${announceName} detected.`);
                 }
-
             }
 
         }
