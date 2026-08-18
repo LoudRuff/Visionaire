@@ -20,6 +20,12 @@ if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, "[]");
 // STATIC SERVING
 // ========================================
 app.use(express.json());
+// NOTE: COOP/COEP headers (for multi-threaded WASM) were tried here but
+// removed — they block any cross-origin CDN script that doesn't send a
+// matching Cross-Origin-Resource-Policy header (face-api.js's build
+// didn't), which silently broke script loading. Reliability for the
+// demo matters more than the WASM speed gain, so left off for now.
+
 app.use(express.static(publicFolder));
 // registered_images lives outside /public, so it needs its own static
 // route to be reachable by the browser (e.g. img.src = "/registered_images/xyz.jpg")
